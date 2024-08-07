@@ -4,6 +4,7 @@ import { fetchStream } from "@/app/utils/fetch-stream";
 
 const LLM_SPLIT = "__LLM_RESPONSE__";
 const RELATED_SPLIT = "__RELATED_QUESTIONS__";
+const IMAGE_SPLIT = "__IMAGE_URL__";
 
 export const parseStreaming = async (
   controller: AbortController,
@@ -12,6 +13,7 @@ export const parseStreaming = async (
   onSources: (value: Source[]) => void,
   onMarkdown: (value: string) => void,
   onRelates: (value: Relate[]) => void,
+  onImage: (value: string) => void,
   onError?: (status: number) => void,
 ) => {
   const decoder = new TextDecoder();
@@ -60,7 +62,15 @@ export const parseStreaming = async (
         sourcesEmitted = true;
         if (rest.includes(RELATED_SPLIT)) {
           const [md] = rest.split(RELATED_SPLIT);
-          markdownParse(md);
+          let markdownPart = md;
+          let imageUrl = "";
+          if (md.includes(IMAGE_SPLIT)) {
+            const parts = md.split(IMAGE_SPLIT);
+            markdownPart = parts[0];
+            imageUrl = parts[1].trim();
+          }
+          markdownParse(markdownPart);
+          onImage(imageUrl);
         } else {
           markdownParse(rest);
         }

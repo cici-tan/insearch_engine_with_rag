@@ -13,6 +13,8 @@ export const Result: FC<{ query: string; rid: string }> = ({ query, rid }) => {
   const [markdown, setMarkdown] = useState<string>("");
   const [relates, setRelates] = useState<Relate[] | null>(null);
   const [error, setError] = useState<number | null>(null);
+  const [image, setImage] = useState<string>("");
+
   useEffect(() => {
     const controller = new AbortController();
     void parseStreaming(
@@ -22,15 +24,17 @@ export const Result: FC<{ query: string; rid: string }> = ({ query, rid }) => {
       setSources,
       setMarkdown,
       setRelates,
+      setImage,
       setError,
     );
     return () => {
       controller.abort();
     };
   }, [query]);
+
   return (
     <div className="flex flex-col gap-8">
-      <Answer markdown={markdown} sources={sources}></Answer>
+      <Answer markdown={markdown} sources={sources} image={image}></Answer>
       <Sources sources={sources}></Sources>
       <Relates relates={relates}></Relates>
       {error && (

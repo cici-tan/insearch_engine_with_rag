@@ -10,10 +10,13 @@ import { BookOpenText } from "lucide-react";
 import { FC } from "react";
 import Markdown from "react-markdown";
 
-export const Answer: FC<{ markdown: string; sources: Source[] }> = ({
-  markdown,
-  sources,
-}) => {
+interface AnswerProps {
+  markdown: string;
+  sources: Source[];
+  image?: string;
+}
+
+export const Answer: FC<AnswerProps> = ({ markdown, sources, image }) => {
   return (
     <Wrapper
       title={
@@ -30,6 +33,7 @@ export const Answer: FC<{ markdown: string; sources: Source[] }> = ({
                   if (!props.href) return <></>;
                   const source = sources[+props.href - 1];
                   if (!source) return <></>;
+                  console.log(image);
                   return (
                     <span className="inline-block w-4">
                       <Popover>
@@ -95,6 +99,15 @@ export const Answer: FC<{ markdown: string; sources: Source[] }> = ({
             >
               {markdown}
             </Markdown>
+            {image && (
+              <div className="mt-4">
+                <img
+                  src={image}
+                  alt="Additional Content"
+                  className="w-full h-auto rounded-lg"
+                />
+              </div>
+            )}
           </div>
         ) : (
           <div className="flex flex-col gap-2">

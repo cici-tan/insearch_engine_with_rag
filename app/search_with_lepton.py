@@ -20,6 +20,12 @@ from leptonai.photon import Photon, StaticFiles
 from leptonai.photon.types import to_bool
 from leptonai.api.workspace import WorkspaceInfoLocalRecord
 from leptonai.util import tool
+from dotenv import load_dotenv
+
+from app.vanna_engine import MyVanna
+
+# load all environment variables
+load_dotenv()
 
 ################################################################################
 # Constant values for the RAG model.
@@ -31,7 +37,7 @@ BING_MKT = "en-US"
 GOOGLE_SEARCH_ENDPOINT = "https://customsearch.googleapis.com/customsearch/v1"
 SERPER_SEARCH_ENDPOINT = "https://google.serper.dev/search"
 SEARCHAPI_SEARCH_ENDPOINT = "https://www.searchapi.io/api/v1/search"
-
+DIFY_RAG_SEARCH_ENGPOINT = "http://127.0.0.1/v1/chat-messages"
 # Specify the number of references from the search engine you want to use.
 # 8 is usually a good number.
 REFERENCE_COUNT = 8
@@ -39,7 +45,7 @@ REFERENCE_COUNT = 8
 # Specify the default timeout for the search engine. If the search engine
 # does not respond within this time, we will return an error.
 DEFAULT_SEARCH_ENGINE_TIMEOUT = 5
-
+DIFY_SEARCH_ENGINE_TIMEOUT = 20
 
 # If the user did not provide a query, we will use this default query.
 _default_query = "Who said 'live long and prosper'?"
@@ -60,8 +66,11 @@ Here are the set of contexts:
 {context}
 
 Remember, don't blindly repeat the contexts verbatim. And here is the user question:
+
+{question}
 """
 
+_sql_summary_text = "从数据中我们能看出什么信息，中文回复"
 # A set of stop words to use - this is not a complete set, and you may want to
 # add more given your observation.
 stop_words = [
@@ -90,7 +99,11 @@ Here are the contexts of the question:
 
 {context}
 
-Remember, based on the original question and related contexts, suggest three such further questions. Do NOT repeat the original question. Each related question should be no longer than 20 words. Here is the original question:
+Remember, based on the original question and related contexts, suggest three such further questions with same language as the question. Do NOT repeat the original question. Each related question should be no longer than 20 words. Here is the original question:
+
+{question}
+
+Remember，response must be in chinese.
 """
 
 
@@ -288,6 +301,53 @@ def search_with_searchapi(query: str, subscription_key: str):
         logger.error(f"Error encountered: {json_content}")
         return []
 
+def search_with_rag(query: str):
+    try:
+        payload = json.dumps({
+            "inputs": {},
+            "query": query,
+            "response_mode": "blocking",
+            "conversation_id": "",
+            "user": "abc-123",
+            "files": [
+                {
+                    "type": "image",
+                    "transfer_method": "remote_url",
+                    "url": "https://cloud.dify.ai/logo/logo-site.png"
+                }
+            ]
+        })
+        headers = {"Authorization": f"Bearer {os.environ.get('DIFY_API_KEY')}", "Content-Type": "application/json"}
+        logger.info(
+            f"{payload} {headers} {DIFY_RAG_SEARCH_ENGPOINT}"
+        )
+        response = requests.post(
+            DIFY_RAG_SEARCH_ENGPOINT,
+            headers=headers,
+            data=payload,
+            timeout=DIFY_SEARCH_ENGINE_TIMEOUT,
+        )
+        if not response.ok:
+            logger.error(f"{response.status_code} {response.text}")
+            raise HTTPException(response.status_code, "Search engine error.")
+        json_content = response.json()
+        # logger.info(f"{json_content}")
+        contexts = []
+        llm_response = None
+        if json_content.get("answer"):
+            llm_response = json_content["answer"]
+        if json_content["metadata"].get("retriever_resources"):
+            contexts += [
+                {"name": c["document_name"].split("｜")[0],
+                 "url": c["document_name"].split("｜")[1].replace(":","/").replace("-",":")+".html",
+                 "snippet":c["content"]}
+                for c in json_content["metadata"]["retriever_resources"]
+            ]
+        return contexts, llm_response
+    except KeyError:
+        logger.error(f"Error encountered: {json_content}")
+        return []
+
 class RAG(Photon):
     """
     Retrieval-Augmented Generation Demo from Lepton AI.
@@ -415,6 +475,8 @@ class RAG(Photon):
                 query,
                 self.search_api_key,
             )
+        elif self.backend == "ZJU":
+            self.search_api_key = os.environ["DIFY_API_KEY"]
         else:
             raise RuntimeError("Backend must be LEPTON, BING, GOOGLE, SERPER or SEARCHAPI.")
         self.model = os.environ["LLM_MODEL"]
@@ -430,7 +492,7 @@ class RAG(Photon):
         # whether we should generate related questions.
         self.should_do_related_questions = to_bool(os.environ["RELATED_QUESTIONS"])
 
-    def get_related_questions(self, query, contexts):
+    def get_related_questions(self, query, contexts, is_snippet=True):
         """
         Gets related questions based on the query and context.
         """
@@ -452,14 +514,23 @@ class RAG(Photon):
             pass
 
         try:
+            if is_snippet:
+                content_format = _more_questions_prompt.format(
+                            context="\n\n".join([c["snippet"] for c in contexts])
+                            ,question=query
+                        )
+            else:
+                content_format = _more_questions_prompt.format(
+                            context=contexts
+                            ,question=query
+                )
+
             response = self.local_client().chat.completions.create(
                 model=self.model,
                 messages=[
                     {
                         "role": "system",
-                        "content": _more_questions_prompt.format(
-                            context="\n\n".join([c["snippet"] for c in contexts])
-                        ),
+                        "content": content_format,
                     },
                     {
                         "role": "user",
@@ -497,15 +568,18 @@ class RAG(Photon):
         yield json.dumps(contexts)
         yield "\n\n__LLM_RESPONSE__\n\n"
         # Second, yield the llm response.
-        if not contexts:
+        if not contexts and os.environ.get("BACKEND") != "ZJU":
             # Prepend a warning to the user
             yield (
                 "(The search engine returned nothing for this query. Please take the"
                 " answer with a grain of salt.)\n\n"
             )
-        for chunk in llm_response:
-            if chunk.choices:
-                yield chunk.choices[0].delta.content or ""
+        if os.environ.get("BACKEND") == "ZJU":
+            yield llm_response
+        else:
+            for chunk in llm_response:
+                if chunk.choices:
+                    yield chunk.choices[0].delta.content or ""
         # Third, yield the related questions. If any error happens, we will just
         # return an empty list.
         if related_questions_future is not None:
@@ -561,7 +635,6 @@ class RAG(Photon):
         if search_uuid:
             try:
                 result = self.kv.get(search_uuid)
-
                 def str_to_generator(result: str) -> Generator[str, None, None]:
                     yield result
 
@@ -584,48 +657,79 @@ class RAG(Photon):
             )
             return StreamingResponse(content=result, media_type="text/html")
 
-        # First, do a search query.
-        query = query or _default_query
-        # Basic attack protection: remove "[INST]" or "[/INST]" from the query
-        query = re.sub(r"\[/?INST\]", "", query)
-        contexts = self.search_function(query)
-
-        system_prompt = _rag_query_text.format(
-            context="\n\n".join(
-                [f"[[citation:{i+1}]] {c['snippet']}" for i, c in enumerate(contexts)]
-            )
-        )
-        try:
-            client = self.local_client()
-            llm_response = client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": query},
-                ],
-                max_tokens=1024,
-                stop=stop_words,
-                stream=True,
-                temperature=0.9,
-            )
-            if self.should_do_related_questions and generate_related_questions:
-                # While the answer is being generated, we can start generating
-                # related questions as a future.
+        if self.backend == "ZJU":
+            vn = MyVanna()
+            # res = vn.get_sql_response(query)
+            contexts = ""
+            res = None
+            if not res:
+                contexts, llm_response = search_with_rag(query)
                 related_questions_future = self.executor.submit(
                     self.get_related_questions, query, contexts
                 )
             else:
-                related_questions_future = None
-        except Exception as e:
-            logger.error(f"encountered error: {e}\n{traceback.format_exc()}")
-            return HTMLResponse("Internal server error.", 503)
+                sql_res_df = res[0]
+                llm_response = vn.get_summary_response(query=query+',中文回复', df=sql_res_df)
+                sql_graph_url = res[1]
+                llm_response = llm_response+"__IMAGE_URL__"+sql_graph_url
+                related_questions_future = self.executor.submit(
+                    self.get_related_questions
+                    , query
+                    , sql_res_df.to_json(orient='records')
+                    , False
+                )
 
-        return StreamingResponse(
-            self.stream_and_upload_to_kv(
-                contexts, llm_response, related_questions_future, search_uuid
-            ),
-            media_type="text/html",
-        )
+            return StreamingResponse(
+                self.stream_and_upload_to_kv(
+                    contexts, llm_response, related_questions_future, search_uuid
+                ),
+                media_type="text/html",
+            )
+        # First, do a search query.
+        # query = query or _default_query
+        # # Basic attack protection: remove "[INST]" or "[/INST]" from the query
+        # query = re.sub(r"\[/?INST\]", "", query)
+        #
+        # contexts = self.search_function(query)
+        #
+        # system_prompt = _rag_query_text.format(
+        #     context="\n\n".join(
+        #         [f"[[citation:{i+1}]] {c['snippet']}" for i, c in enumerate(contexts)]
+        #     )
+        #     , question=query
+        # )
+        # logger.info(f"-----------RAG system prompt--------- {system_prompt}")
+        # try:
+        #     client = self.local_client()
+        #     llm_response = client.chat.completions.create(
+        #         model=self.model,
+        #         messages=[
+        #             {"role": "system", "content": system_prompt},
+        #             {"role": "user", "content": query},
+        #         ],
+        #         max_tokens=1024,
+        #         stop=stop_words,
+        #         stream=True,
+        #         temperature=0.9,
+        #     )
+        #     if self.should_do_related_questions and generate_related_questions:
+        #         # While the answer is being generated, we can start generating
+        #         # related questions as a future.
+        #         related_questions_future = self.executor.submit(
+        #             self.get_related_questions, query, contexts
+        #         )
+        #     else:
+        #         related_questions_future = None
+        # except Exception as e:
+        #     logger.error(f"encountered error: {e}\n{traceback.format_exc()}")
+        #     return HTMLResponse("Internal server error.", 503)
+        #
+        # return StreamingResponse(
+        #     self.stream_and_upload_to_kv(
+        #         contexts, llm_response, related_questions_future, search_uuid
+        #     ),
+        #     media_type="text/html",
+        # )
 
     @Photon.handler(mount=True)
     def ui(self):
