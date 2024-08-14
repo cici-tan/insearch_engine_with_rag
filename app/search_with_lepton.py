@@ -45,7 +45,7 @@ REFERENCE_COUNT = 8
 # Specify the default timeout for the search engine. If the search engine
 # does not respond within this time, we will return an error.
 DEFAULT_SEARCH_ENGINE_TIMEOUT = 5
-DIFY_SEARCH_ENGINE_TIMEOUT = 20
+DIFY_SEARCH_ENGINE_TIMEOUT = 90
 
 # If the user did not provide a query, we will use this default query.
 _default_query = "Who said 'live long and prosper'?"
@@ -327,6 +327,7 @@ def search_with_rag(query: str):
             data=payload,
             timeout=DIFY_SEARCH_ENGINE_TIMEOUT,
         )
+        # logger.info(response.text)
         if not response.ok:
             logger.error(f"{response.status_code} {response.text}")
             raise HTTPException(response.status_code, "Search engine error.")
@@ -546,6 +547,7 @@ class RAG(Photon):
             related = response.choices[0].message.tool_calls[0].function.arguments
             if isinstance(related, str):
                 related = json.loads(related)
+            # related = ""
             logger.trace(f"Related questions: {related}")
             return related["questions"][:5]
         except Exception as e:
@@ -658,16 +660,16 @@ class RAG(Photon):
             return StreamingResponse(content=result, media_type="text/html")
 
         if self.backend == "ZJU":
-            vn = MyVanna()
-            # res = vn.get_sql_response(query)
+
             contexts = ""
-            res = None
-            if not res:
+            if not any(w in query for w in ["多少","数量"]):
                 contexts, llm_response = search_with_rag(query)
                 related_questions_future = self.executor.submit(
                     self.get_related_questions, query, contexts
                 )
             else:
+                vn = MyVanna()
+                res = vn.get_sql_response(query)
                 sql_res_df = res[0]
                 llm_response = vn.get_summary_response(query=query+',中文回复', df=sql_res_df)
                 sql_graph_url = res[1]
